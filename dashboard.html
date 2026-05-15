@@ -1,0 +1,180 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>Session Keeper</title>
+    <link rel="stylesheet" href="dashboard.css">
+  </head>
+  <body>
+    <div class="app-shell">
+      <aside class="sidebar">
+        <header class="brand">
+          <span class="brand-mark" aria-hidden="true">
+            <svg viewBox="0 0 24 24">
+              <path d="M4 5.5A2.5 2.5 0 0 1 6.5 3h11A2.5 2.5 0 0 1 20 5.5v13a2.5 2.5 0 0 1-2.5 2.5h-11A2.5 2.5 0 0 1 4 18.5v-13Z"></path>
+              <path d="M8 8h8M8 12h8M8 16h5"></path>
+            </svg>
+          </span>
+          <span>
+            <strong>Session Keeper</strong>
+            <small id="autosaveLabel">Autosaves every 15 minutes</small>
+          </span>
+        </header>
+
+        <label class="search-box">
+          <svg viewBox="0 0 24 24" aria-hidden="true">
+            <circle cx="11" cy="11" r="7"></circle>
+            <path d="m20 20-3.8-3.8"></path>
+          </svg>
+          <input id="searchInput" type="search" placeholder="Search sessions or tabs">
+        </label>
+
+        <div class="sidebar-actions">
+          <button class="primary-button" id="saveManualButton" type="button">
+            <svg viewBox="0 0 24 24" aria-hidden="true">
+              <path d="M12 5v14M5 12h14"></path>
+            </svg>
+            Save session
+          </button>
+          <button class="ghost-button" id="autosaveNowButton" type="button" title="Create autosave now" aria-label="Create autosave now">
+            <svg viewBox="0 0 24 24" aria-hidden="true">
+              <path d="M20 12a8 8 0 1 1-2.35-5.65"></path>
+              <path d="M20 4v6h-6"></path>
+            </svg>
+          </button>
+        </div>
+
+        <section class="session-list" id="sessionList" aria-label="Saved sessions"></section>
+      </aside>
+
+      <main class="main-panel">
+        <section class="hero-panel">
+          <div>
+            <p class="label">Current browser</p>
+            <h1 id="currentTitle">0 tabs open</h1>
+            <p id="currentMeta">Open tabs will appear here after the dashboard loads.</p>
+          </div>
+          <div class="hero-actions">
+            <button class="secondary-button" id="copyCurrentButton" type="button">
+              <svg viewBox="0 0 24 24" aria-hidden="true">
+                <path d="M9 9h9v11H9z"></path>
+                <path d="M6 15H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h8a2 2 0 0 1 2 2v1"></path>
+              </svg>
+              Copy code block
+            </button>
+            <button class="secondary-button" id="exportCurrentButton" type="button">
+              <svg viewBox="0 0 24 24" aria-hidden="true">
+                <path d="M12 3v11"></path>
+                <path d="m7 10 5 5 5-5"></path>
+                <path d="M5 21h14"></path>
+              </svg>
+              Export TXT
+            </button>
+          </div>
+        </section>
+
+        <section class="split-grid">
+          <article class="detail-panel">
+            <header class="panel-header">
+              <div>
+                <p class="label" id="detailKind">Selected session</p>
+                <h2 id="detailTitle">Latest session</h2>
+                <p id="detailMeta">Pick a saved session to inspect, copy, export, or restore.</p>
+              </div>
+              <div class="panel-actions">
+                <button class="icon-button" id="copySelectedButton" type="button" title="Copy selected links as code block" aria-label="Copy selected links as code block">
+                  <svg viewBox="0 0 24 24" aria-hidden="true">
+                    <path d="M9 9h9v11H9z"></path>
+                    <path d="M6 15H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h8a2 2 0 0 1 2 2v1"></path>
+                  </svg>
+                </button>
+                <button class="icon-button" id="exportSelectedButton" type="button" title="Export selected links as TXT" aria-label="Export selected links as TXT">
+                  <svg viewBox="0 0 24 24" aria-hidden="true">
+                    <path d="M12 3v11"></path>
+                    <path d="m7 10 5 5 5-5"></path>
+                    <path d="M5 21h14"></path>
+                  </svg>
+                </button>
+                <button class="icon-button" id="restoreSelectedButton" type="button" title="Restore selected session" aria-label="Restore selected session">
+                  <svg viewBox="0 0 24 24" aria-hidden="true">
+                    <path d="M3 12a9 9 0 1 0 3-6.7"></path>
+                    <path d="M3 4v6h6"></path>
+                    <path d="M12 8v5l3 2"></path>
+                  </svg>
+                </button>
+              </div>
+            </header>
+            <div class="tab-list" id="selectedTabList"></div>
+          </article>
+
+          <article class="detail-panel">
+            <header class="panel-header">
+              <div>
+                <p class="label">Open now</p>
+                <h2 id="openNowTitle">Current tabs</h2>
+                <p id="openNowMeta">Grouped by browser window.</p>
+              </div>
+            </header>
+            <div class="tab-list" id="currentTabList"></div>
+          </article>
+        </section>
+      </main>
+    </div>
+
+    <dialog class="save-dialog" id="saveDialog">
+      <form method="dialog" id="saveForm">
+        <header>
+          <h2>Name this session</h2>
+          <button class="icon-button" value="cancel" type="submit" aria-label="Close">
+            <svg viewBox="0 0 24 24" aria-hidden="true">
+              <path d="M6 6l12 12M18 6 6 18"></path>
+            </svg>
+          </button>
+        </header>
+        <label class="field">
+          <span>Session name</span>
+          <input id="sessionNameInput" type="text" autocomplete="off">
+        </label>
+        <p>The default name is the same timestamp style used by autosaves. Manual saves are tagged and highlighted separately.</p>
+        <footer>
+          <button class="secondary-button" value="cancel" type="submit">Cancel</button>
+          <button class="primary-button" id="confirmSaveButton" value="default" type="submit">Save manual</button>
+        </footer>
+      </form>
+    </dialog>
+
+    <template id="sessionTemplate">
+      <button class="session-card" type="button">
+        <span class="kind-pill"></span>
+        <strong class="session-name"></strong>
+        <span class="session-meta"></span>
+      </button>
+    </template>
+
+    <template id="windowTemplate">
+      <section class="window-group">
+        <h3></h3>
+        <div class="window-tabs"></div>
+      </section>
+    </template>
+
+    <template id="tabTemplate">
+      <article class="tab-row">
+        <figure class="tab-preview">
+          <img class="tab-thumbnail" alt="">
+          <img class="favicon" alt="">
+        </figure>
+        <div>
+          <strong class="tab-title"></strong>
+          <span class="tab-url"></span>
+        </div>
+        <a class="open-link" target="_blank" rel="noreferrer">Open</a>
+      </article>
+    </template>
+
+    <div class="toast" id="toast" role="status" aria-live="polite"></div>
+
+    <script src="dashboard.js"></script>
+  </body>
+</html>
