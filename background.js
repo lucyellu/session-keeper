@@ -2,20 +2,23 @@
 
 const STORAGE_KEY = "sessionKeeper.sessions";
 const SETTINGS_KEY = "sessionKeeper.settings";
+const THUMBNAIL_INDEX_KEY = "sessionKeeper.thumbnailIndex";
 const AUTOSAVE_ALARM = "session-keeper-autosave";
 const THUMBNAIL_DB_NAME = "sessionKeeper.thumbnails";
 const THUMBNAIL_DB_VERSION = 1;
 const THUMBNAIL_STORE = "thumbnails";
 const THUMBNAIL_WIDTH = 320;
 const THUMBNAIL_HEIGHT = 200;
-const THUMBNAIL_TAB_SETTLE_MS = 300;
 const THUMBNAIL_CAPTURE_INTERVAL_MS = 650;
 const THUMBNAIL_CAPTURE_RETRY_MS = 1000;
+const THUMBNAIL_PASSIVE_CAPTURE_DELAY_MS = 1000;
 const DEFAULT_SETTINGS = {
   autosaveMinutes: 15,
   maxAutosaves: 80
 };
 let thumbnailDbPromise = null;
+let lastThumbnailCaptureAt = 0;
+const pendingPassiveCaptures = new Map();
 
 chrome.runtime.onInstalled.addListener(async () => {
   await ensureSettings();
@@ -30,7 +33,8 @@ chrome.runtime.onStartup.addListener(async () => {
   setTimeout(() => captureSession({ kind: "auto" }).then(updateBadge), 2500);
 });
 
-chrome.action.onClicked.addListener(() => {
+chrome.action.onClicked.addListener(async () => {
+  await captureLastFocusedVisibleTabThumbnail();
   chrome.tabs.create({ url: chrome.runtime.getURL("dashboard.html") });
 });
 
@@ -41,8 +45,14 @@ chrome.alarms.onAlarm.addListener((alarm) => {
 
 chrome.tabs.onCreated.addListener(updateBadge);
 chrome.tabs.onRemoved.addListener(updateBadge);
-chrome.tabs.onUpdated.addListener((_tabId, changeInfo) => {
-  if (changeInfo.status === "complete") updateBadge();
+chrome.tabs.onActivated.addListener(({ tabId, windowId }) => {
+  schedulePassiveThumbnailCapture(tabId, windowId);
+});
+chrome.tabs.onUpdated.addListener((tabId, changeInfo, tab) => {
+  if (changeInfo.status === "complete") {
+    updateBadge();
+    if (tab.active) schedulePassiveThumbnailCapture(tabId, tab.windowId);
+  }
 });
 
 chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
@@ -71,10 +81,8 @@ async function handleMessage(message) {
     }
     case "DELETE_SESSION": {
       const currentSessions = await getSessions();
-      const deletedSession = currentSessions.find((session) => session.id === message.id);
       const sessions = currentSessions.filter((session) => session.id !== message.id);
       await setSessions(sessions);
-      await deleteSessionThumbnails(deletedSession);
       return { sessions };
     }
     case "GET_THUMBNAILS": {
@@ -99,7 +107,7 @@ async function handleMessage(message) {
 
 async function captureSession({ kind = "auto", name = "" } = {}) {
   const windows = await getCurrentWindows();
-  await attachTabThumbnails(windows);
+  await attachCachedTabThumbnails(windows);
   const now = new Date();
   const createdAt = now.toISOString();
   const session = {
@@ -119,7 +127,6 @@ async function captureSession({ kind = "auto", name = "" } = {}) {
   const autosavesToDrop = autosaves.slice(settings.maxAutosaves);
   const autosaveIdsToDrop = new Set(autosavesToDrop.map((item) => item.id));
   await setSessions(next.filter((item) => !autosaveIdsToDrop.has(item.id)));
-  await deleteSessionsThumbnails(autosavesToDrop);
   return session;
 }
 
@@ -146,59 +153,83 @@ async function getCurrentWindows() {
   }));
 }
 
-async function attachTabThumbnails(windows) {
+async function attachCachedTabThumbnails(windows) {
+  const index = await getThumbnailIndex();
+  for (const window of windows) {
+    for (const tab of window.tabs || []) {
+      tab.thumbnailId = index[thumbnailIndexKey(tab.url)] || "";
+    }
+  }
+}
+
+function schedulePassiveThumbnailCapture(tabId, windowId) {
+  if (!Number.isInteger(tabId) || !Number.isInteger(windowId)) return;
+
+  clearTimeout(pendingPassiveCaptures.get(tabId));
+  pendingPassiveCaptures.set(
+    tabId,
+    setTimeout(() => {
+      pendingPassiveCaptures.delete(tabId);
+      captureVisibleTabThumbnail(tabId, windowId);
+    }, THUMBNAIL_PASSIVE_CAPTURE_DELAY_MS)
+  );
+}
+
+async function captureVisibleTabThumbnail(tabId, windowId) {
   if (!chrome.tabs.captureVisibleTab) return;
 
-  const captureVisibleTab = createCaptureLimiter();
-  let lastFocusedWindow = null;
   try {
-    lastFocusedWindow = await chrome.windows.getLastFocused({ windowTypes: ["normal"] });
+    const [tab, window] = await Promise.all([
+      chrome.tabs.get(tabId),
+      chrome.windows.get(windowId)
+    ]);
+
+    if (!tab.active || !window.focused || !isCapturableTab(tab)) return;
+
+    await waitForCaptureSlot();
+    const screenshotUrl = await captureVisibleTab(windowId);
+    const thumbnailBlob = await createThumbnailBlob(screenshotUrl);
+    const thumbnailId = `${Date.now()}-${tab.id}-${Math.random().toString(36).slice(2, 8)}`;
+    const key = thumbnailIndexKey(tab.url);
+    const index = await getThumbnailIndex();
+
+    await saveThumbnail(thumbnailId, thumbnailBlob);
+    index[key] = thumbnailId;
+    await setThumbnailIndex(index);
+  } catch (error) {
+    console.warn("Session Keeper could not passively capture a thumbnail:", error);
+  }
+}
+
+async function captureLastFocusedVisibleTabThumbnail() {
+  try {
+    const [tab] = await chrome.tabs.query({ active: true, lastFocusedWindow: true });
+    if (tab?.id && Number.isInteger(tab.windowId)) {
+      await captureVisibleTabThumbnail(tab.id, tab.windowId);
+    }
   } catch {
-    lastFocusedWindow = null;
+    // Best effort; opening the dashboard should never depend on thumbnail capture.
   }
+}
 
-  const activeTabsByWindow = new Map(
-    windows
-      .map((window) => [window.id, (window.tabs || []).find((tab) => tab.active)?.id])
-      .filter(([, tabId]) => Number.isInteger(tabId))
-  );
+async function captureVisibleTab(windowId) {
+  try {
+    const screenshotUrl = await chrome.tabs.captureVisibleTab(windowId, {
+      format: "jpeg",
+      quality: 45
+    });
+    lastThumbnailCaptureAt = Date.now();
+    return screenshotUrl;
+  } catch (error) {
+    if (!isCaptureRateLimitError(error)) throw error;
 
-  for (const window of windows) {
-    if (!Number.isInteger(window.id)) continue;
-
-    for (const tab of window.tabs || []) {
-      if (!isCapturableTab(tab)) continue;
-
-      try {
-        await chrome.windows.update(window.id, { focused: true });
-        await chrome.tabs.update(tab.id, { active: true });
-        await delay(THUMBNAIL_TAB_SETTLE_MS);
-        const screenshotUrl = await captureVisibleTab(window.id);
-        const thumbnailBlob = await createThumbnailBlob(screenshotUrl);
-        const thumbnailId = `${Date.now()}-${tab.id}-${Math.random().toString(36).slice(2, 8)}`;
-        await saveThumbnail(thumbnailId, thumbnailBlob);
-        tab.thumbnailId = thumbnailId;
-      } catch (error) {
-        console.warn(`Session Keeper could not capture a thumbnail for ${tab.url}:`, error);
-        tab.thumbnailId = "";
-      }
-    }
-  }
-
-  for (const [windowId, tabId] of activeTabsByWindow) {
-    try {
-      await chrome.tabs.update(tabId, { active: true });
-    } catch {
-      // The tab may have closed during capture.
-    }
-  }
-
-  if (Number.isInteger(lastFocusedWindow?.id)) {
-    try {
-      await chrome.windows.update(lastFocusedWindow.id, { focused: true });
-    } catch {
-      // The window may have closed during capture.
-    }
+    await delay(THUMBNAIL_CAPTURE_RETRY_MS);
+    const screenshotUrl = await chrome.tabs.captureVisibleTab(windowId, {
+      format: "jpeg",
+      quality: 45
+    });
+    lastThumbnailCaptureAt = Date.now();
+    return screenshotUrl;
   }
 }
 
@@ -206,35 +237,8 @@ function isCapturableTab(tab) {
   return Number.isInteger(tab.id) && /^(https?|file|chrome|chrome-extension):/i.test(tab.url || "");
 }
 
-function createCaptureLimiter() {
-  let lastCaptureAt = 0;
-
-  return async function captureVisibleTab(windowId) {
-    await waitForCaptureSlot(lastCaptureAt);
-
-    try {
-      const screenshotUrl = await chrome.tabs.captureVisibleTab(windowId, {
-        format: "jpeg",
-        quality: 45
-      });
-      lastCaptureAt = Date.now();
-      return screenshotUrl;
-    } catch (error) {
-      if (!isCaptureRateLimitError(error)) throw error;
-
-      await delay(THUMBNAIL_CAPTURE_RETRY_MS);
-      const screenshotUrl = await chrome.tabs.captureVisibleTab(windowId, {
-        format: "jpeg",
-        quality: 45
-      });
-      lastCaptureAt = Date.now();
-      return screenshotUrl;
-    }
-  };
-}
-
-async function waitForCaptureSlot(lastCaptureAt) {
-  const elapsed = Date.now() - lastCaptureAt;
+async function waitForCaptureSlot() {
+  const elapsed = Date.now() - lastThumbnailCaptureAt;
   if (elapsed < THUMBNAIL_CAPTURE_INTERVAL_MS) {
     await delay(THUMBNAIL_CAPTURE_INTERVAL_MS - elapsed);
   }
@@ -276,6 +280,19 @@ async function getThumbnails(ids) {
   return Object.fromEntries(entries.filter(([, dataUrl]) => dataUrl));
 }
 
+async function getThumbnailIndex() {
+  const result = await chrome.storage.local.get({ [THUMBNAIL_INDEX_KEY]: {} });
+  return result[THUMBNAIL_INDEX_KEY] || {};
+}
+
+async function setThumbnailIndex(index) {
+  await chrome.storage.local.set({ [THUMBNAIL_INDEX_KEY]: index });
+}
+
+function thumbnailIndexKey(url = "") {
+  return String(url).trim();
+}
+
 async function saveThumbnail(id, blob) {
   const db = await openThumbnailDb();
   return runThumbnailTransaction(db, "readwrite", (store) => store.put(blob, id));
@@ -284,32 +301,6 @@ async function saveThumbnail(id, blob) {
 async function readThumbnail(id) {
   const db = await openThumbnailDb();
   return runThumbnailTransaction(db, "readonly", (store) => store.get(id));
-}
-
-async function deleteSessionThumbnails(session) {
-  await deleteThumbnails(collectThumbnailIds([session]));
-}
-
-async function deleteSessionsThumbnails(sessions) {
-  await deleteThumbnails(collectThumbnailIds(sessions));
-}
-
-async function deleteThumbnails(ids) {
-  const uniqueIds = [...new Set(ids.filter(Boolean))];
-  if (!uniqueIds.length) return;
-
-  const db = await openThumbnailDb();
-  await runThumbnailTransaction(db, "readwrite", (store) => {
-    uniqueIds.forEach((id) => store.delete(id));
-  });
-}
-
-function collectThumbnailIds(sessions = []) {
-  return sessions
-    .filter(Boolean)
-    .flatMap((session) => session.windows || [])
-    .flatMap((window) => window.tabs || [])
-    .map((tab) => tab.thumbnailId);
 }
 
 function openThumbnailDb() {
