@@ -203,7 +203,7 @@ async function attachTabThumbnails(windows) {
 }
 
 function isCapturableTab(tab) {
-  return Number.isInteger(tab.id) && /^(https?|file|chrome-extension):/i.test(tab.url || "");
+  return Number.isInteger(tab.id) && /^(https?|file|chrome|chrome-extension):/i.test(tab.url || "");
 }
 
 function createCaptureLimiter() {
